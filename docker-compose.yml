@@ -1,0 +1,65 @@
+name: coding-agent
+
+services:
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://n8n:5678
+    restart: unless-stopped
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.43.7
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
+      - N8N_WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - GENERIC_TIMEZONE=${TIMEZONE:-Asia/Tehran}
+      - TZ=${TIMEZONE:-Asia/Tehran}
+      - EXECUTIONS_TIMEOUT=900
+      - EXECUTIONS_TIMEOUT_MAX=900
+      - N8N_PROXY_HOPS=1
+      - N8N_DIAGNOSTICS_ENABLED=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/import/workflows:ro
+      - ./setup/generated:/import/credentials:ro
+    depends_on:
+      - sandbox
+
+  sandbox:
+    build: ./sandbox
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - MAX_FIX_ATTEMPTS=5
+      - SOFT_DEADLINE_SEC=780
+      - RUN_TIMEOUT_SEC=120
+      - MAX_TURNS=10
+      - RUN_AS_UID=1001
+      - RUN_AS_GID=1001
+      - DEFAULT_PUSH_REPO=${DEFAULT_PUSH_REPO:-https://github.com/ghafooridev/n8n_test_code}
+    volumes:
+      - sandbox_workspaces:/workspaces
+      - sandbox_data:/data
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - KILL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  n8n_data:
+  sandbox_workspaces:
+  sandbox_data:

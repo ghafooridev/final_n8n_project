@@ -1,0 +1,171 @@
+{
+  "id": "CodeAgentErrRep1",
+  "name": "Coding Agent - Error Report",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "n-on-workflow-error",
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://sandbox:8080/report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ error: String(($json.execution.error && $json.execution.error.message) || 'Unknown error') + ' (last node: ' + ($json.execution.lastNodeExecuted || '?') + ')' }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "n-close-task",
+      "name": "Close task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "Has chat?-c",
+              "leftValue": "={{ $json.ok && !!$json.chatId }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n-has-chat-",
+      "name": "Has chat?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "markdown",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ 'REPORT-' + $json.taskId + '.md' }}"
+        }
+      },
+      "id": "n-report-to-file",
+      "name": "Report to file",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Close task').first().json.chatId }}",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "caption": "={{ 'Stopped. ' + $('Close task').first().json.caption }}",
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-stop-report",
+      "name": "Send stop report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        0
+      ],
+      "webhookId": "wh-send-stop-report",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Close task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close task": {
+      "main": [
+        [
+          {
+            "node": "Has chat?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has chat?": {
+      "main": [
+        [
+          {
+            "node": "Report to file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report to file": {
+      "main": [
+        [
+          {
+            "node": "Send stop report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

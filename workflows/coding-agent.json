@@ -1,0 +1,1595 @@
+{
+  "id": "CodeAgentMain001",
+  "name": "Coding Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "n-telegram-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1600,
+        300
+      ],
+      "webhookId": "coding-agent-telegram-trigger",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $json.message || {};\nconst text = String(msg.text || '').trim();\nconst chatId = msg.chat ? String(msg.chat.id) : '';\nconst match = text.match(/https:\\/\\/github\\.com\\/[\\w.-]+\\/[\\w.-]+/);\nconst repoUrl = match ? match[0].replace(/\\.git$/, '').replace(/\\.$/, '') : '';\nconst isCommand = text === '' || text.startsWith('/start') || text.startsWith('/help');\nreturn [{\n  json: {\n    chatId,\n    text,\n    repoUrl,\n    mode: repoUrl ? 'existing-codebase' : 'new-project',\n    project: repoUrl || 'general',\n    taskId: 't' + Date.now().toString(36),\n    isTask: !isCommand,\n  },\n}];"
+      },
+      "id": "n-parse-request",
+      "name": "Parse request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1380,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "Is a task?-c",
+              "leftValue": "={{ $json.isTask }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n-is-a-task-",
+      "name": "Is a task?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "Send me a coding task.\n\nNew project: describe what to build, e.g. Build a Node CLI that converts Celsius to Fahrenheit, with tests.\n\nExisting code: include a GitHub URL, e.g. https://github.com/ghafooridev/n8n_test_code add a multiply function to helper.js with tests.",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-help",
+      "name": "Send help",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -940,
+        500
+      ],
+      "webhookId": "wh-send-help",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://sandbox:8080/init",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ taskId: $json.taskId, request: $json.text, repoUrl: $json.repoUrl, chatId: $json.chatId, project: $json.project }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "n-init-workspace",
+      "name": "Init workspace",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -940,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "Init ok?-c",
+              "leftValue": "={{ $json.ok }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n-init-ok-",
+      "name": "Init ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Parse request').first().json.chatId }}",
+        "text": "=Could not prepare the sandbox: {{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-init-error",
+      "name": "Send init error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -500,
+        400
+      ],
+      "webhookId": "wh-send-init-error",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Parse request').first().json.chatId }}",
+        "text": "=Task {{ $json.taskId }} started ({{ $json.mode }}).\nLimits: 5 fix attempts, 15 minutes. I will send REPORT.md when it ends.",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-started",
+      "name": "Send started",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -500,
+        0
+      ],
+      "webhookId": "wh-send-started",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r1",
+              "name": "task_id",
+              "value": "={{ $json.taskId }}",
+              "type": "string"
+            },
+            {
+              "id": "r2",
+              "name": "execution_id",
+              "value": "={{ $execution.id }}",
+              "type": "string"
+            },
+            {
+              "id": "r3",
+              "name": "chat_id",
+              "value": "={{ $('Parse request').first().json.chatId }}",
+              "type": "string"
+            },
+            {
+              "id": "r4",
+              "name": "request",
+              "value": "={{ $('Parse request').first().json.text }}",
+              "type": "string"
+            },
+            {
+              "id": "r5",
+              "name": "mode",
+              "value": "={{ $json.mode }}",
+              "type": "string"
+            },
+            {
+              "id": "r6",
+              "name": "status",
+              "value": "running",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n-run-row",
+      "name": "Run row",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "runs"
+        },
+        "operation": "insert",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "n-save-run-start",
+      "name": "Save run start",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -280,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "agent_memory"
+        },
+        "operation": "get",
+        "matchType": "anyCondition",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "project",
+              "condition": "eq",
+              "keyValue": "={{ $('Parse request').first().json.project }}"
+            },
+            {
+              "keyName": "project",
+              "condition": "eq",
+              "keyValue": "general"
+            }
+          ]
+        },
+        "limit": 30,
+        "orderBy": true,
+        "orderByColumn": "id",
+        "orderByDirection": "DESC"
+      },
+      "id": "n-load-memory",
+      "name": "Load memory",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -60,
+        200
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const project = $('Parse request').first().json.project;\nconst rows = $input.all().map((i) => i.json).filter((r) => r && r.note);\nconst lines = [];\nlet size = 0;\nfor (const r of rows) {\n  const scope = r.project === project && project !== 'general' ? 'this repo' : 'general';\n  const line = `- [${scope}, ${r.kind || 'note'}] ${r.note}`;\n  if (size + line.length > 1200 || lines.length >= 8) break;\n  lines.push(line);\n  size += line.length;\n}\nreturn [{ json: { memoryText: lines.join('\\n') || '(no memory yet)', memoryCount: lines.length } }];"
+      },
+      "id": "n-pick-memory",
+      "name": "Pick memory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://sandbox:8080/turn",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ taskId: $('Parse request').first().json.taskId, agentOutput: String($json.output || '').slice(0, 400), agentError: $json.error ? String($json.error.message || $json.error).slice(0, 400) : '' }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "n-next-turn",
+      "name": "Next turn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "Stop?-c",
+              "leftValue": "={{ $json.stop }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n-stop-",
+      "name": "Stop?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        600,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $json;\nconst req = $('Parse request').first().json;\nconst init = $('Init workspace').first().json;\nconst memory = $('Pick memory').first().json.memoryText;\nconst ws = t.workingState || {};\nconst b = t.budget || {};\nconst last = ws.lastRun;\nconst lastRun = last\n  ? `command: ${last.command} (purpose ${last.purpose})\\nexit code: ${last.exitCode}${last.timedOut ? ' (timed out)' : ''}\\noutput tail:\\n${last.outputTail}`\n  : '(nothing run yet)';\nconst parts = [\n  `TASK FROM THE USER:\\n${req.text}`,\n  `MODE: ${t.mode}` + (req.repoUrl ? ` (repo cloned from ${req.repoUrl})` : ' (empty workspace: create the project from scratch)'),\n];\nif (b.turn === 1) parts.push(`WORKSPACE AT START:\\n${init.tree}\\nHINTS: ${(init.hints || []).join('; ')}`);\nparts.push(\n  `MEMORY FROM EARLIER RUNS:\\n${memory}`,\n  `BUDGET: turn ${b.turn}/${b.maxTurns}, ${b.secondsLeft}s left, fix attempts used ${b.fixAttemptsUsed}/${b.fixAttemptsUsed + b.fixAttemptsLeft}`,\n  `YOUR SAVED STATE:\\nplan: ${ws.plan}\\nnotes: ${ws.notes}\\nnext step: ${ws.nextStep}\\nfiles written: ${(ws.filesWritten || []).join(', ') || 'none'}`,\n  `LAST VERIFICATION RUN:\\n${lastRun}`,\n  `RECENT ACTIONS:\\n${(t.recentActions || []).join('\\n') || '(none)'}`,\n  b.turn === 1\n    ? 'Start now: explore what you need, then save a plan with update_state.'\n    : 'Continue from your saved state. Do not redo finished steps.'\n);\nreturn [{ json: { prompt: parts.join('\\n\\n'), taskId: t.taskId } }];"
+      },
+      "id": "n-build-prompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        820,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "options": {
+          "systemMessage": "You are a senior software engineer working as an autonomous coding agent inside an isolated Docker sandbox (Node 20, Python 3 with pytest, git, internet for npm/pip).\n\nYou work in short TURNS. Each turn you receive: the task, memory from earlier runs, your budget, your saved state and the last test result. Messages from earlier turns are NOT shown again, so save anything important with update_state before the turn ends.\n\nHow to work:\n1. Understand the task. Only if it is truly ambiguous, or needs a decision only the user can make, call ask_human once with one short, specific question. Otherwise decide yourself and note the assumption.\n2. Explore only what you need: list_files with a small depth, search_code to locate code, then read_file on specific line ranges. Never dump whole folders or huge files.\n3. Plan: call update_state with a short numbered plan and the test command before writing code.\n4. Implement with write_file (always the FULL file content). In an existing codebase keep changes minimal and follow its style and test setup.\n5. Verify for real with run_command. purpose=setup for installs (npm install, pip install), purpose=test for tests. Commands must exit on their own: no servers, no watch mode. New projects must include automated tests and a single test command (npm test or python -m pytest -q).\n6. If tests fail: read the output, find the root cause, fix it, run again. You have at most 5 fix attempts for the whole task.\n7. For non-trivial changes call code_reviewer once before finishing. Fix real issues it reports, then run the tests again.\n8. Call finish exactly once. DONE only when the latest test run passed after your last edit (the sandbox rejects DONE otherwise). FAILED if you cannot make it work or a limit is reached. BLOCKED if you need the human and got no answer. The summary must say what changed, which files, and how it was verified. lessons: 1 to 3 short lines useful for future tasks on this project (test command, framework, pitfalls).\n\nRules:\n- About every 5 tool calls, and always before you stop, call update_state with notes (what is done, key facts) and next_step.\n- If a tool returns ok:false, read its message and adapt. Never claim you ran or tested something you did not.\n- Keep tool inputs small. Do not paste large outputs back into notes.",
+          "maxIterations": 8
+        }
+      },
+      "id": "n-coding-agent",
+      "name": "Coding Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1040,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "openai/gpt-4o"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "baseURL": "https://models.github.ai/inference",
+          "temperature": 0.2,
+          "maxRetries": 6,
+          "timeout": 120000,
+          "maxTokens": 3000
+        }
+      },
+      "id": "n-gpt-4o--github-models-",
+      "name": "GPT-4o (GitHub Models)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        700,
+        760
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "CredGhModels0001",
+          "name": "GitHub Models (gpt-4o)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "List files and folders in the workspace. Skips node_modules and .git. Use a small depth.",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/list_files",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "path",
+              "value": "={{ $fromAI('path', 'Folder relative to the workspace root, . for root', 'string', '.') }}"
+            },
+            {
+              "name": "depth",
+              "value": "={{ $fromAI('depth', 'How many folder levels to show, 1 to 4', 'number', 2) }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-list-files",
+      "name": "list_files",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Read up to 150 lines of a file with line numbers. Use startLine/endLine to read only the part you need.",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/read_file",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "path",
+              "value": "={{ $fromAI('path', 'File path relative to the workspace root', 'string') }}"
+            },
+            {
+              "name": "startLine",
+              "value": "={{ $fromAI('startLine', 'First line to read, 1-based', 'number', 1) }}"
+            },
+            {
+              "name": "endLine",
+              "value": "={{ $fromAI('endLine', 'Last line to read', 'number', 150) }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-read-file",
+      "name": "read_file",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        920,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Search file contents with an extended regex (grep -E). Returns file:line:text matches. Use it to find where things are before reading.",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/search",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "pattern",
+              "value": "={{ $fromAI('pattern', 'Regex or plain word to search for', 'string') }}"
+            },
+            {
+              "name": "path",
+              "value": "={{ $fromAI('path', 'Folder to search in, . for everything', 'string', '.') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-search-code",
+      "name": "search_code",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Create or overwrite a file with its FULL new content. Parent folders are created automatically.",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/write_file",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "path",
+              "value": "={{ $fromAI('path', 'File path relative to the workspace root', 'string') }}"
+            },
+            {
+              "name": "content",
+              "value": "={{ $fromAI('content', 'The complete file content', 'string') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-write-file",
+      "name": "write_file",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        1160,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Run a shell command in the workspace inside the sandbox (120s timeout). purpose=setup for installs, test for tests, run for anything else. Failed test/run commands count toward the 5 fix attempts.",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/run",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "command",
+              "value": "={{ $fromAI('command', 'Shell command, e.g. npm test or python -m pytest -q', 'string') }}"
+            },
+            {
+              "name": "purpose",
+              "value": "={{ $fromAI('purpose', 'One of: setup, test, run', 'string', 'run') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-run-command",
+      "name": "run_command",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Show the files changed so far (git diff against the starting point).",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/diff",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "scope",
+              "value": "={{ $fromAI('scope', 'Always the word all', 'string', 'all') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-show-diff",
+      "name": "show_diff",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Save your working state for the next turn: plan, notes (facts and progress) and next_step. Only non-empty fields are saved.",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/update_state",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "plan",
+              "value": "={{ $fromAI('plan', 'Numbered plan, or empty to keep the current one', 'string', '') }}"
+            },
+            {
+              "name": "notes",
+              "value": "={{ $fromAI('notes', 'Progress and key facts to remember', 'string', '') }}"
+            },
+            {
+              "name": "next_step",
+              "value": "={{ $fromAI('next_step', 'The very next action', 'string', '') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-update-state",
+      "name": "update_state",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        1520,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Close the task. status DONE (latest tests passed), FAILED, or BLOCKED. Call exactly once at the end.",
+        "method": "POST",
+        "url": "http://sandbox:8080/tools/finish",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "={{ $fromAI('status', 'DONE, FAILED or BLOCKED', 'string') }}"
+            },
+            {
+              "name": "summary",
+              "value": "={{ $fromAI('summary', 'What changed, which files, how it was verified, what is left', 'string') }}"
+            },
+            {
+              "name": "lessons",
+              "value": "={{ $fromAI('lessons', '1 to 3 short lessons for future tasks, one per line', 'string', '') }}"
+            },
+            {
+              "name": "test_command",
+              "value": "={{ $fromAI('test_command', 'The command that verifies the project', 'string', '') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "n-finish",
+      "name": "finish",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        1640,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Sub-agent that reviews the current changes with read-only tools and returns VERDICT: PASS or CHANGES_NEEDED with concrete issues. Use once before finishing non-trivial work.",
+        "text": "={{ $fromAI('review_request', 'The goal of the change, the files changed, and anything you are unsure about', 'string') }}",
+        "options": {
+          "systemMessage": "You are a strict code reviewer sub-agent. You only have read-only tools.\nCall show_diff first, then read only the files you need.\nCheck: bugs, unhandled edge cases, missing or weak tests, and whether the change really does what was asked.\nReply in plain text, at most 150 words:\nVERDICT: PASS or VERDICT: CHANGES_NEEDED\nthen up to 5 concrete issues, each with file and line and the fix.",
+          "maxIterations": 6
+        }
+      },
+      "id": "n-code-reviewer",
+      "name": "code_reviewer",
+      "type": "@n8n/n8n-nodes-langchain.agentTool",
+      "typeVersion": 3,
+      "position": [
+        1760,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "description": "Ask the human user one question on Telegram and wait up to 5 minutes for the answer. Use only when the task is ambiguous or a decision is risky.",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CodeAgentAskHum1"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "question": "={{ $fromAI('question', 'One short, specific question for the user', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "question",
+              "displayName": "question",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "id": "n-ask-human",
+      "name": "ask_human",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        1880,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://sandbox:8080/report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ taskId: $json.taskId, stopReason: $json.reason }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "n-build-report",
+      "name": "Build report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "markdown",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ 'REPORT-' + $json.taskId + '.md' }}"
+        }
+      },
+      "id": "n-report-to-file",
+      "name": "Report to file",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Build report').first().json.chatId }}",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "caption": "={{ $('Build report').first().json.caption }}",
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-report",
+      "name": "Send report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1260,
+        -200
+      ],
+      "webhookId": "wh-send-report",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "Can push?-c",
+              "leftValue": "={{ $('Build report').first().json.canPush }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n-can-push-",
+      "name": "Can push?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1480,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "chatId": "={{ $('Build report').first().json.chatId }}",
+        "message": "=Tests pass for task {{ $('Build report').first().json.taskId }}.\nChanged: {{ $('Build report').first().json.filesChanged.join(', ').slice(0, 600) }}\n\nPush branch agent/{{ $('Build report').first().json.taskId }} to GitHub?",
+        "responseType": "approval",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "Push",
+            "disapproveLabel": "Do not push"
+          }
+        },
+        "options": {
+          "appendAttribution": false,
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 10,
+              "resumeUnit": "minutes"
+            }
+          }
+        }
+      },
+      "id": "n-approve-push",
+      "name": "Approve push",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1700,
+        -300
+      ],
+      "webhookId": "wh-approve-push",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "Approved?-c",
+              "leftValue": "={{ String($json.data && $json.data.approved) }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "true"
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n-approved-",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://sandbox:8080/push",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ taskId: $('Build report').first().json.taskId }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "n-push-branch",
+      "name": "Push branch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2140,
+        -400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CredGitPush00001",
+          "name": "GitHub push token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Build report').first().json.chatId }}",
+        "text": "={{ $json.ok ? 'Pushed. Branch: ' + $json.url : 'Push failed: ' + String($json.message || '').replace(/[<>&]/g, ' ').slice(0, 800) }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-push-result",
+      "name": "Send push result",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2360,
+        -400
+      ],
+      "webhookId": "wh-send-push-result",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Build report').first().json.chatId }}",
+        "text": "=Not pushed. The files stay in the sandbox workspace {{ $('Build report').first().json.taskId }}.",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-not-pushed",
+      "name": "Send not pushed",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2140,
+        -200
+      ],
+      "webhookId": "wh-send-not-pushed",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst rows = (r.lessons || []).map((note) => ({ project: r.project, kind: 'lesson', note, task_id: r.taskId }));\nconst summary = String(r.summary || r.stopReason || '').split('\\n')[0].slice(0, 280);\nrows.push({ project: r.project, kind: 'task', note: `Task ${r.taskId} ended ${r.status}: ${summary}`, task_id: r.taskId });\nreturn rows.map((json) => ({ json }));"
+      },
+      "id": "n-memory-rows",
+      "name": "Memory rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        -560
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "agent_memory"
+        },
+        "operation": "insert",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "n-save-memory",
+      "name": "Save memory",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1260,
+        -560
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s1",
+              "name": "status",
+              "value": "={{ $json.status }}",
+              "type": "string"
+            },
+            {
+              "id": "s2",
+              "name": "summary",
+              "value": "={{ String($json.summary || $json.stopReason).slice(0, 1000) }}",
+              "type": "string"
+            },
+            {
+              "id": "s3",
+              "name": "fix_attempts",
+              "value": "={{ $json.fixAttemptsUsed }}",
+              "type": "number"
+            },
+            {
+              "id": "s4",
+              "name": "turns",
+              "value": "={{ $json.turns }}",
+              "type": "number"
+            },
+            {
+              "id": "s5",
+              "name": "duration_sec",
+              "value": "={{ $json.durationSec }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n-run-result",
+      "name": "Run result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1040,
+        -400
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "runs"
+        },
+        "operation": "update",
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "task_id",
+              "condition": "eq",
+              "keyValue": "={{ $('Build report').first().json.taskId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "n-save-run-result",
+      "name": "Save run result",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1260,
+        -400
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse request": {
+      "main": [
+        [
+          {
+            "node": "Is a task?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is a task?": {
+      "main": [
+        [
+          {
+            "node": "Init workspace",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send help",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init workspace": {
+      "main": [
+        [
+          {
+            "node": "Init ok?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init ok?": {
+      "main": [
+        [
+          {
+            "node": "Send started",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send init error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run row": {
+      "main": [
+        [
+          {
+            "node": "Save run start",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save run start": {
+      "main": [
+        [
+          {
+            "node": "Load memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load memory": {
+      "main": [
+        [
+          {
+            "node": "Pick memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick memory": {
+      "main": [
+        [
+          {
+            "node": "Next turn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next turn": {
+      "main": [
+        [
+          {
+            "node": "Stop?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stop?": {
+      "main": [
+        [
+          {
+            "node": "Build report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coding Agent": {
+      "main": [
+        [
+          {
+            "node": "Next turn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build report": {
+      "main": [
+        [
+          {
+            "node": "Report to file",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Memory rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report to file": {
+      "main": [
+        [
+          {
+            "node": "Send report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send report": {
+      "main": [
+        [
+          {
+            "node": "Can push?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can push?": {
+      "main": [
+        [
+          {
+            "node": "Approve push",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve push": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Push branch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send not pushed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push branch": {
+      "main": [
+        [
+          {
+            "node": "Send push result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Memory rows": {
+      "main": [
+        [
+          {
+            "node": "Save memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run result": {
+      "main": [
+        [
+          {
+            "node": "Save run result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT-4o (GitHub Models)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "code_reviewer",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "list_files": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          },
+          {
+            "node": "code_reviewer",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read_file": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          },
+          {
+            "node": "code_reviewer",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_code": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          },
+          {
+            "node": "code_reviewer",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "write_file": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "run_command": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "show_diff": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          },
+          {
+            "node": "code_reviewer",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update_state": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "finish": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "code_reviewer": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ask_human": {
+      "ai_tool": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "CodeAgentErrRep1",
+    "executionTimeout": 900,
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
