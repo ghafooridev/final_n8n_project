@@ -153,6 +153,85 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "Has init report?-c",
+              "leftValue": "={{ !!$json.markdown }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n-has-init-report-",
+      "name": "Has init report?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -500,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "markdown",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ 'REPORT-' + $json.taskId + '.md' }}"
+        }
+      },
+      "id": "n-init-failure-file",
+      "name": "Init failure file",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -260,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Init workspace').first().json.chatId }}",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "caption": "={{ $('Init workspace').first().json.caption }}",
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "n-send-init-report",
+      "name": "Send init report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -20,
+        640
+      ],
+      "webhookId": "wh-send-init-report",
+      "credentials": {
+        "telegramApi": {
+          "id": "CredTelegram0001",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
         "chatId": "={{ $('Parse request').first().json.chatId }}",
         "text": "=Could not prepare the sandbox: {{ $json.message }}",
         "additionalFields": {
@@ -165,8 +244,8 @@
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        -500,
-        400
+        -260,
+        420
       ],
       "webhookId": "wh-send-init-error",
       "credentials": {
@@ -404,7 +483,7 @@
         "promptType": "define",
         "text": "={{ $json.prompt }}",
         "options": {
-          "systemMessage": "You are a senior software engineer working as an autonomous coding agent inside an isolated Docker sandbox (Node 20, Python 3 with pytest, git, internet for npm/pip).\n\nYou work in short TURNS. Each turn you receive: the task, memory from earlier runs, your budget, your saved state and the last test result. Messages from earlier turns are NOT shown again, so save anything important with update_state before the turn ends.\n\nHow to work:\n1. Understand the task. Only if it is truly ambiguous, or needs a decision only the user can make, call ask_human once with one short, specific question. Otherwise decide yourself and note the assumption.\n2. Explore only what you need: list_files with a small depth, search_code to locate code, then read_file on specific line ranges. Never dump whole folders or huge files.\n3. Plan: call update_state with a short numbered plan and the test command before writing code.\n4. Implement with write_file (always the FULL file content). In an existing codebase keep changes minimal and follow its style and test setup.\n5. Verify for real with run_command. purpose=setup for installs (npm install, pip install), purpose=test for tests. Commands must exit on their own: no servers, no watch mode. New projects must include automated tests and a single test command (npm test or python -m pytest -q).\n6. If tests fail: read the output, find the root cause, fix it, run again. You have at most 5 fix attempts for the whole task.\n7. For non-trivial changes call code_reviewer once before finishing. Fix real issues it reports, then run the tests again.\n8. Call finish exactly once. DONE only when the latest test run passed after your last edit (the sandbox rejects DONE otherwise). FAILED if you cannot make it work or a limit is reached. BLOCKED if you need the human and got no answer. The summary must say what changed, which files, and how it was verified. lessons: 1 to 3 short lines useful for future tasks on this project (test command, framework, pitfalls).\n\nRules:\n- About every 5 tool calls, and always before you stop, call update_state with notes (what is done, key facts) and next_step.\n- If a tool returns ok:false, read its message and adapt. Never claim you ran or tested something you did not.\n- Keep tool inputs small. Do not paste large outputs back into notes.",
+          "systemMessage": "You are a senior software engineer working as an autonomous coding agent inside an isolated Docker sandbox (Node 20, Python 3 with pytest, git, internet for npm/pip).\n\nYou work in short TURNS. Each turn you receive: the task, memory from earlier runs, your budget, your saved state and the last test result. Messages from earlier turns are NOT shown again, so save anything important with update_state before the turn ends.\n\nHow to work:\n1. Understand the task. Only if it is truly ambiguous, or needs a decision only the user can make, call ask_human once with one short, specific question. Otherwise decide yourself and note the assumption.\n2. Explore only what you need: list_files with a small depth, search_code to locate code, then read_file on specific line ranges. Never dump whole folders or huge files.\n3. Plan: call update_state with a short numbered plan and the test command before writing code.\n4. Implement with write_file (always the FULL file content). In an existing codebase keep changes minimal and follow its style and test setup.\n5. Verify for real with run_command. purpose=setup for installs (npm install, pip install), purpose=test for tests. Commands must exit on their own: no servers, no watch mode. New projects must include automated tests and a single test command (npm test or python -m pytest -q).\n6. If tests fail: read the output, find the root cause, fix it, run again. You have at most 5 failed repair attempts for the whole task. The first failure is free. Every later failed command counts, including ones labeled setup. A passing install does not count.\n7. For non-trivial changes call code_reviewer once before finishing. Fix real issues it reports, then run the tests again.\n8. Call finish exactly once. DONE only when the latest test run passed after your last edit and really executed the project's tests (npm test, pytest, node --test, or a test file). The sandbox rejects DONE for a bare \"true\" or \"echo\". FAILED if you cannot make it work or a limit is reached. BLOCKED if you need the human and got no answer. The summary must say what changed, which files, and how it was verified. lessons: 1 to 3 short lines useful for future tasks on this project (test command, framework, pitfalls).\n\nRules:\n- About every 5 tool calls, and always before you stop, call update_state with notes (what is done, key facts) and next_step.\n- If a tool returns ok:false, read its message and adapt. Never claim you ran or tested something you did not.\n- Keep tool inputs small. Do not paste large outputs back into notes.",
           "maxIterations": 8
         }
       },
@@ -583,7 +662,7 @@
     },
     {
       "parameters": {
-        "toolDescription": "Run a shell command in the workspace inside the sandbox (120s timeout). purpose=setup for installs, test for tests, run for anything else. Failed test/run commands count toward the 5 fix attempts.",
+        "toolDescription": "Run a shell command in the workspace inside the sandbox (120s timeout). purpose=setup for installs, test for tests, run for anything else. The first failed command is recorded. Every later failure counts toward the 5 repair attempts, including purpose=setup.",
         "method": "POST",
         "url": "http://sandbox:8080/tools/run",
         "sendBody": true,
@@ -1215,7 +1294,36 @@
         ],
         [
           {
+            "node": "Has init report?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has init report?": {
+      "main": [
+        [
+          {
+            "node": "Init failure file",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Send init error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init failure file": {
+      "main": [
+        [
+          {
+            "node": "Send init report",
             "type": "main",
             "index": 0
           }

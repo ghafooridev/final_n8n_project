@@ -7,7 +7,7 @@ const path = require('path');
 const assert = require('assert');
 
 const withNetwork = process.argv.includes('--network');
-const servers = [];
+const closers = [];
 let passed = 0;
 
 async function startServer(port, extraEnv = {}) {
@@ -19,13 +19,15 @@ async function startServer(port, extraEnv = {}) {
       WORKSPACES_DIR: path.join(root, 'ws'),
       DATA_DIR: path.join(root, 'data'),
       RUN_TIMEOUT_SEC: '3',
+      CLONE_TIMEOUT_SEC: '15',
       MAX_FIX_ATTEMPTS: '5',
       MAX_TURNS: '3',
+      ALLOW_SHUTDOWN: '1',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
-  servers.push(child);
+  child.on('error', () => {});
   await new Promise((resolve) => child.stdout.once('data', resolve));
   const base = `http://127.0.0.1:${port}`;
   const post = async (p, body = {}, headers = {}) => {
@@ -33,7 +35,24 @@ async function startServer(port, extraEnv = {}) {
     return r.json();
   };
   const get = async (p) => (await fetch(base + p)).json();
-  return { post, get, root };
+  const close = async () => {
+    try {
+      await fetch(base + '/shutdown', { method: 'POST' });
+    } catch (e) {
+      // The process may already be gone.
+    }
+    child.on('error', () => {});
+    try {
+      child.kill();
+    } catch (e) {
+      // A restricted environment can refuse to signal the child.
+    }
+    if (child.stdout) child.stdout.destroy();
+    if (child.stderr) child.stderr.destroy();
+    child.unref();
+  };
+  closers.push(close);
+  return { post, get, root, close };
 }
 
 async function test(name, fn) {
@@ -59,10 +78,18 @@ async function main() {
     taskId = r.taskId;
   });
 
-  await test('init rejects non-github repo', async () => {
-    const r = await s.post('/init', { request: 'x', repoUrl: 'https://evil.example.com/a/b' });
+  await test('bad repo URL fails init and still writes a report', async () => {
+    const r = await s.post('/init', { request: 'please clone this', repoUrl: 'https://evil.example.com/a/b', chatId: 9, taskId: 'badrepo01' });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.error, 'BAD_REPO');
+    assert.strictEqual(r.status, 'BAD_REPO');
+    assert.strictEqual(r.chatId, '9');
+    assert.ok(r.markdown.includes('# Coding Agent Report'));
+    assert.ok(r.markdown.includes('please clone this'));
+    assert.ok(r.markdown.includes('**BAD_REPO**'));
+    assert.ok(r.markdown.includes('(workspace was not created)'));
+    assert.ok(fs.existsSync(path.join(s.root, 'data', 'reports', 'badrepo01.md')));
+    assert.ok(!fs.existsSync(path.join(s.root, 'ws', 'badrepo01')));
   });
 
   await test('path traversal and .git are blocked', async () => {
@@ -109,21 +136,21 @@ async function main() {
     assert.strictEqual(r.error, 'NOT_VERIFIED');
   });
 
-  await test('failing test is recorded, setup failures are not counted', async () => {
+  await test('the first failure is free; the next failure counts even after setup', async () => {
     let r = await s.post('/tools/run', { command: 'exit 3', purpose: 'setup' });
     assert.strictEqual(r.exitCode, 3);
     assert.strictEqual(r.budget.fixAttemptsUsed, 0);
     r = await s.post('/tools/run', { command: 'node test/sum.test.js', purpose: 'test' });
     assert.strictEqual(r.exitCode, 1);
     assert.ok(r.output.includes('expected 5 got -1'));
-    assert.strictEqual(r.budget.fixAttemptsUsed, 0);
+    assert.strictEqual(r.budget.fixAttemptsUsed, 1);
   });
 
   await test('fix then passing test allows DONE; writes after test force a re-run', async () => {
     await s.post('/tools/write_file', { path: 'src/sum.js', content: 'module.exports = (a, b) => a + b;\n' });
     let r = await s.post('/tools/run', { command: 'node test/sum.test.js', purpose: 'test' });
     assert.strictEqual(r.exitCode, 0);
-    assert.strictEqual(r.budget.fixAttemptsUsed, 1, 'the successful re-run after a failure is a fix attempt');
+    assert.strictEqual(r.budget.fixAttemptsUsed, 1, 'a passing retest does not consume another repair attempt');
     await s.post('/tools/write_file', { path: 'README.md', content: '# sum\n' });
     r = await s.post('/tools/finish', { status: 'DONE', summary: 'x' });
     assert.strictEqual(r.error, 'NOT_VERIFIED');
@@ -158,6 +185,42 @@ async function main() {
     assert.strictEqual(r.error, 'NO_TOKEN');
   });
 
+  await test('DONE rejects a passing command that did not run tests', async () => {
+    await s.post('/init', { request: 'noop evidence', taskId: 'noop01', chatId: 3 });
+    await s.post('/tools/write_file', { path: 'src/sum.js', content: 'module.exports = (a, b) => a + b;\n' });
+    let r = await s.post('/tools/run', { command: 'true', purpose: 'test' });
+    assert.strictEqual(r.exitCode, 0);
+    r = await s.post('/tools/finish', { status: 'DONE', summary: 'claimed done' });
+    assert.strictEqual(r.error, 'NOT_VERIFIED');
+    r = await s.post('/tools/run', { command: 'echo all tests passed', purpose: 'test' });
+    r = await s.post('/tools/finish', { status: 'DONE', summary: 'claimed done' });
+    assert.strictEqual(r.error, 'NOT_VERIFIED');
+    await s.post('/tools/write_file', { path: 'package.json', content: '{"scripts":{"test":"true"}}\n' });
+    r = await s.post('/tools/run', { command: 'npm test', purpose: 'test' });
+    assert.strictEqual(r.exitCode, 0);
+    r = await s.post('/tools/finish', { status: 'DONE', summary: 'claimed done' });
+    assert.strictEqual(r.error, 'NOT_VERIFIED');
+    assert.ok(/does not run tests/.test(r.message));
+  });
+
+  await test('setup failures cannot bypass the 5 repair attempts', async () => {
+    await s.post('/init', { request: 'setup limit', taskId: 'setuplimit1' });
+    let r;
+    for (let i = 1; i <= 6; i += 1) {
+      r = await s.post('/tools/run', { command: 'echo setup-fail; exit 1', purpose: 'setup' });
+    }
+    assert.strictEqual(r.budget.limitReached, true);
+    assert.strictEqual(r.budget.fixAttemptsUsed, 5);
+    r = await s.post('/tools/run', { command: 'npm install', purpose: 'setup' });
+    assert.strictEqual(r.error, 'LIMIT_REACHED');
+    r = await s.post('/turn', {});
+    assert.strictEqual(r.status, 'LIMIT_REACHED');
+    r = await s.post('/report', {});
+    assert.strictEqual(r.status, 'LIMIT_REACHED');
+    assert.ok(r.markdown.includes('setup limit'));
+    assert.ok(r.markdown.includes('Fix attempts | 5 / 5'));
+  });
+
   await test('fix-attempt limit: 6th failed run sets LIMIT_REACHED', async () => {
     await s.post('/init', { request: 'limit test' });
     let r;
@@ -190,6 +253,10 @@ async function main() {
     const r = await s.post('/turn', {});
     assert.strictEqual(r.stop, true);
     assert.strictEqual(r.status, 'MAX_TURNS');
+    const report = await s.post('/report', {});
+    assert.strictEqual(report.status, 'MAX_TURNS');
+    assert.ok(report.markdown.includes('turns test'));
+    assert.ok(report.markdown.includes('MAX_TURNS'));
   });
 
   await test('error report closes a running task', async () => {
@@ -198,6 +265,17 @@ async function main() {
     assert.strictEqual(r.status, 'ERROR');
     assert.strictEqual(r.chatId, '55');
     assert.ok(r.markdown.includes('Execution timed out'));
+  });
+
+  await test('an error before any task still produces a report', async () => {
+    const lonely = await startServer(18083);
+    const r = await lonely.post('/report', { error: 'sandbox crashed before init', chatId: '4' });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.status, 'ERROR');
+    assert.strictEqual(r.chatId, '4');
+    assert.ok(r.markdown.includes('sandbox crashed before init'));
+    assert.ok(r.markdown.includes('(workspace was not created)'));
+    assert.ok(r.markdown.includes('(no workspace was created for this run)'));
   });
 
   const d = await startServer(18081, { SOFT_DEADLINE_SEC: '1' });
@@ -212,9 +290,55 @@ async function main() {
     assert.strictEqual(r.stop, true);
   });
 
+  const deadlineReport = await startServer(18082, { SOFT_DEADLINE_SEC: '1' });
+  await test('deadline termination writes a DEADLINE report', async () => {
+    await deadlineReport.post('/init', { request: 'deadline report', taskId: 'deadline01', chatId: 8 });
+    await new Promise((r) => setTimeout(r, 1500));
+    const turn = await deadlineReport.post('/turn', {});
+    assert.strictEqual(turn.stop, true);
+    assert.strictEqual(turn.status, 'DEADLINE');
+    const report = await deadlineReport.post('/report', { stopReason: turn.reason });
+    assert.strictEqual(report.status, 'DEADLINE');
+    assert.ok(report.markdown.includes('deadline report'));
+    assert.ok(report.markdown.includes('time budget'));
+    assert.ok(fs.existsSync(path.join(deadlineReport.root, 'data', 'reports', 'deadline01.md')));
+  });
+
+  await test('clone failure still produces a report without a usable workspace', async () => {
+    const r = await s.post('/init', {
+      request: 'change helper.js in the sample repo',
+      repoUrl: 'https://github.com/ghafooridev/n8n_test_code_missing_zzz',
+      chatId: 77,
+      taskId: 'clonefail01',
+    });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.error, 'CLONE_FAILED');
+    assert.strictEqual(r.status, 'CLONE_FAILED');
+    assert.strictEqual(r.chatId, '77');
+    assert.ok(r.markdown.includes('# Coding Agent Report'));
+    assert.ok(r.markdown.includes('change helper.js'));
+    assert.ok(r.markdown.includes('**CLONE_FAILED**'));
+    assert.ok(fs.existsSync(path.join(s.root, 'data', 'reports', 'clonefail01.md')));
+  });
+
+  await test('read_file stays inside the context cap', async () => {
+    await s.post('/init', { request: 'context cap', taskId: 'context01' });
+    const lines = Array.from({ length: 400 }, (_, i) => `line ${i + 1}`).join('\n');
+    await s.post('/tools/write_file', { path: 'big.txt', content: lines + '\n' });
+    const r = await s.post('/tools/read_file', { path: 'big.txt' });
+    assert.strictEqual(r.endLine - r.startLine + 1, 150);
+    assert.ok(r.more.includes('continues'));
+    assert.ok(r.content.length <= 4000);
+  });
+
   if (withNetwork) {
-    await test('init clones an existing GitHub repo', async () => {
-      const r = await s.post('/init', { request: 'inspect repo', repoUrl: 'https://github.com/ghafooridev/n8n_test_code' });
+    await test('init clones an existing GitHub repo when the network works', async () => {
+      const r = await s.post('/init', { request: 'inspect repo', repoUrl: 'https://github.com/ghafooridev/n8n_test_code', taskId: 'cloneok01' });
+      if (!r.ok && r.error === 'CLONE_FAILED') {
+        assert.ok(r.markdown.includes('**CLONE_FAILED**'));
+        console.log('skip - clone unreachable: ' + String(r.message).split('\n').slice(-2).join(' '));
+        return;
+      }
       assert.strictEqual(r.ok, true, JSON.stringify(r));
       assert.strictEqual(r.mode, 'existing-codebase');
       assert.ok(r.tree.length > 0);
@@ -222,7 +346,24 @@ async function main() {
     });
   }
 
+  await test('search stays inside the context cap', async () => {
+    await s.post('/init', { request: 'search cap', taskId: 'search01' });
+    for (let i = 0; i < 10; i += 1) {
+      const body = Array.from({ length: 6 }, () => 'NEEDLE token').join('\n') + '\n';
+      await s.post('/tools/write_file', { path: `notes/n${i}.txt`, content: body });
+    }
+    const r = await s.post('/tools/search', { pattern: 'NEEDLE', path: '.' });
+    const shown = r.matches.split('\n').filter(Boolean).length;
+    assert.ok(shown <= 40, `search returned ${shown} lines`);
+    assert.strictEqual(r.truncated, true);
+    assert.ok(r.totalMatches > 40);
+  });
+
   console.log(`\n${passed} tests passed`);
+}
+
+async function stopServers() {
+  await Promise.all(closers.map((close) => close()));
 }
 
 main()
@@ -230,4 +371,7 @@ main()
     console.error('FAILED:', err);
     process.exitCode = 1;
   })
-  .finally(() => servers.forEach((c) => c.kill()));
+  .finally(async () => {
+  await stopServers();
+  process.exit(process.exitCode || 0);
+});

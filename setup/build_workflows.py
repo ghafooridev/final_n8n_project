@@ -158,9 +158,9 @@ How to work:
 3. Plan: call update_state with a short numbered plan and the test command before writing code.
 4. Implement with write_file (always the FULL file content). In an existing codebase keep changes minimal and follow its style and test setup.
 5. Verify for real with run_command. purpose=setup for installs (npm install, pip install), purpose=test for tests. Commands must exit on their own: no servers, no watch mode. New projects must include automated tests and a single test command (npm test or python -m pytest -q).
-6. If tests fail: read the output, find the root cause, fix it, run again. You have at most 5 fix attempts for the whole task.
+6. If tests fail: read the output, find the root cause, fix it, run again. You have at most 5 failed repair attempts for the whole task. The first failure is free. Every later failed command counts, including ones labeled setup. A passing install does not count.
 7. For non-trivial changes call code_reviewer once before finishing. Fix real issues it reports, then run the tests again.
-8. Call finish exactly once. DONE only when the latest test run passed after your last edit (the sandbox rejects DONE otherwise). FAILED if you cannot make it work or a limit is reached. BLOCKED if you need the human and got no answer. The summary must say what changed, which files, and how it was verified. lessons: 1 to 3 short lines useful for future tasks on this project (test command, framework, pitfalls).
+8. Call finish exactly once. DONE only when the latest test run passed after your last edit and really executed the project's tests (npm test, pytest, node --test, or a test file). The sandbox rejects DONE for a bare "true" or "echo". FAILED if you cannot make it work or a limit is reached. BLOCKED if you need the human and got no answer. The summary must say what changed, which files, and how it was verified. lessons: 1 to 3 short lines useful for future tasks on this project (test command, framework, pitfalls).
 
 Rules:
 - About every 5 tool calls, and always before you stop, call update_state with notes (what is done, key facts) and next_step.
@@ -284,11 +284,42 @@ def build_main():
             [-940, 200],
         ),
         if_node("Init ok?", "={{ $json.ok }}", IS_TRUE, [-720, 200]),
+        if_node("Has init report?", "={{ !!$json.markdown }}", IS_TRUE, [-500, 520]),
+        node(
+            "Init failure file",
+            "n8n-nodes-base.convertToFile",
+            1.1,
+            {
+                "operation": "toText",
+                "sourceProperty": "markdown",
+                "binaryPropertyName": "data",
+                "options": {"fileName": "={{ 'REPORT-' + $json.taskId + '.md' }}"},
+            },
+            [-260, 640],
+        ),
+        node(
+            "Send init report",
+            "n8n-nodes-base.telegram",
+            1.2,
+            {
+                "operation": "sendDocument",
+                "chatId": "={{ $('Init workspace').first().json.chatId }}",
+                "binaryData": True,
+                "binaryPropertyName": "data",
+                "additionalFields": {
+                    "caption": "={{ $('Init workspace').first().json.caption }}",
+                    "parse_mode": "HTML",
+                },
+            },
+            [-20, 640],
+            webhookId="wh-send-init-report",
+            credentials=TELEGRAM,
+        ),
         telegram_text(
             "Send init error",
             "={{ $('Parse request').first().json.chatId }}",
             "=Could not prepare the sandbox: {{ $json.message }}",
-            [-500, 400],
+            [-260, 420],
         ),
         telegram_text(
             "Send started",
@@ -414,7 +445,7 @@ def build_main():
         sandbox_tool(
             "run_command",
             "run",
-            "Run a shell command in the workspace inside the sandbox (120s timeout). purpose=setup for installs, test for tests, run for anything else. Failed test/run commands count toward the 5 fix attempts.",
+            "Run a shell command in the workspace inside the sandbox (120s timeout). purpose=setup for installs, test for tests, run for anything else. The first failed command is recorded. Every later failure counts toward the 5 repair attempts, including purpose=setup.",
             [("command", from_ai("command", "Shell command, e.g. npm test or python -m pytest -q")),
              ("purpose", from_ai("purpose", "One of: setup, test, run", "string", "run"))],
             [1280, 560],
@@ -625,7 +656,10 @@ def build_main():
     connect(c, "Init workspace", "Init ok?")
     connect(c, "Init ok?", "Send started", 0)
     connect(c, "Init ok?", "Run row", 0)
-    connect(c, "Init ok?", "Send init error", 1)
+    connect(c, "Init ok?", "Has init report?", 1)
+    connect(c, "Has init report?", "Init failure file", 0)
+    connect(c, "Has init report?", "Send init error", 1)
+    connect(c, "Init failure file", "Send init report")
     connect(c, "Run row", "Save run start")
     connect(c, "Save run start", "Load memory")
     connect(c, "Load memory", "Pick memory")

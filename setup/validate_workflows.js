@@ -73,15 +73,29 @@ function runCode(jsCode, { json, items, nodes }) {
 async function withSandbox(fn) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-validate-'));
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'sandbox', 'server.js')], {
-    env: { ...process.env, PORT: '18090', WORKSPACES_DIR: path.join(root, 'ws'), DATA_DIR: path.join(root, 'data') },
+    env: { ...process.env, PORT: '18090', WORKSPACES_DIR: path.join(root, 'ws'), DATA_DIR: path.join(root, 'data'), ALLOW_SHUTDOWN: '1' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
+  child.on('error', () => {});
   await new Promise((r) => child.stdout.once('data', r));
   const post = async (p, body) => (await fetch(`http://127.0.0.1:18090${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
   try {
     await fn(post);
   } finally {
-    child.kill();
+    try {
+      await fetch('http://127.0.0.1:18090/shutdown', { method: 'POST' });
+    } catch (e) {
+      // The process may already be gone.
+    }
+    child.on('error', () => {});
+    try {
+      child.kill();
+    } catch (e) {
+      // See sandbox/test.js: cleanup must not fail the run.
+    }
+    if (child.stdout) child.stdout.destroy();
+    if (child.stderr) child.stderr.destroy();
+    child.unref();
   }
 }
 
@@ -106,7 +120,17 @@ async function withSandbox(fn) {
     nodes: { 'Parse request': parsedNew },
   });
   assert.strictEqual(out[0].json.memoryCount, 8, 'memory is capped');
-  console.log('ok - Pick memory (empty + capped)');
+  out = runCode(pickJs, {
+    items: [
+      { id: 3, project: 'general', kind: 'lesson', note: 'x'.repeat(800) },
+      { id: 2, project: 'general', kind: 'lesson', note: 'y'.repeat(800) },
+      { id: 1, project: 'general', kind: 'lesson', note: 'z'.repeat(800) },
+    ],
+    nodes: { 'Parse request': parsedNew },
+  });
+  assert.ok(out[0].json.memoryText.length <= 1200, `memory text is ${out[0].json.memoryText.length} chars`);
+  assert.ok(out[0].json.memoryCount < 3, 'long notes stop before the character cap');
+  console.log('ok - Pick memory (empty + capped at 8 notes and 1200 chars)');
 
   await withSandbox(async (post) => {
     const init = await post('/init', { taskId: parsedNew.taskId, request: parsedNew.text, chatId: parsedNew.chatId, project: 'general' });
@@ -123,9 +147,11 @@ async function withSandbox(fn) {
     assert.ok(prompt.length < 3000, `first-turn prompt is small (${prompt.length} chars)`);
     console.log(`ok - Build prompt (turn 1, ${prompt.length} chars)\n---\n${prompt}\n---`);
 
-    await post('/tools/write_file', { path: 'index.js', content: 'console.log(1)\n' });
-    await post('/tools/run', { command: 'node index.js', purpose: 'test' });
-    await post('/tools/finish', { status: 'DONE', summary: 'Printed 1.', lessons: 'node index.js works' });
+    await post('/tools/write_file', { path: 'test/app.test.js', content: "console.log('pass');\n" });
+    const ran = await post('/tools/run', { command: 'node test/app.test.js', purpose: 'test' });
+    assert.strictEqual(ran.exitCode, 0, ran.output || ran.message);
+    const finished = await post('/tools/finish', { status: 'DONE', summary: 'Tests passed.', lessons: 'node test/app.test.js is the project test command' });
+    assert.strictEqual(finished.ok, true, JSON.stringify(finished));
     const t2 = await post('/turn', { taskId: parsedNew.taskId, agentOutput: 'done' });
     assert.strictEqual(t2.stop, true);
     const report = await post('/report', { taskId: parsedNew.taskId, stopReason: t2.reason });
@@ -140,4 +166,6 @@ async function withSandbox(fn) {
 })().catch((e) => {
   console.error('FAILED:', e.message);
   process.exitCode = 1;
+}).finally(() => {
+  process.exit(process.exitCode || 0);
 });

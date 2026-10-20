@@ -14,6 +14,7 @@ const CONFIG = {
   maxFixAttempts: Number(process.env.MAX_FIX_ATTEMPTS || 5),
   softDeadlineSec: Number(process.env.SOFT_DEADLINE_SEC || 780),
   runTimeoutSec: Number(process.env.RUN_TIMEOUT_SEC || 120),
+  cloneTimeoutSec: Number(process.env.CLONE_TIMEOUT_SEC || 120),
   maxTurns: Number(process.env.MAX_TURNS || 10),
   runAsUid: process.env.RUN_AS_UID ? Number(process.env.RUN_AS_UID) : null,
   runAsGid: process.env.RUN_AS_GID ? Number(process.env.RUN_AS_GID) : null,
@@ -36,6 +37,10 @@ const LIMITS = {
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.agent', '__pycache__', '.venv', 'venv', '.pytest_cache', '.next', '.cache']);
 const GITHUB_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/;
 const TASK_ID = /^[A-Za-z0-9_-]{1,40}$/;
+const TRIVIAL_COMMAND = /^(?:true|:|false|exit\s+0|echo(?:\s+[\s\S]*)?)$/i;
+const TEST_FILE = /(?:^|\/)(?:test_.+\.[a-z0-9]+|.+_test\.[a-z0-9]+|.+\.(?:test|spec)\.[a-z0-9]+)$/i;
+const TEST_DIR = /(?:^|\/)(?:__tests__|tests?|spec)(?:\/|$)/i;
+const TEST_RUNNER = /\b(?:pytest|jest|mocha|vitest|phpunit|rspec|ctest)\b|\bnode\s+--test\b|\bpython(?:3)?\s+-m\s+(?:pytest|unittest)\b|\bgo\s+test\b|\bcargo\s+test\b|\bmvn\s+(?:-q\s+)?test\b|\bgradle\s+test\b|\bdotnet\s+test\b/i;
 
 const tasksDir = path.join(CONFIG.dataDir, 'tasks');
 const reportsDir = path.join(CONFIG.dataDir, 'reports');
@@ -282,48 +287,14 @@ function projectHints(ws) {
   return hints;
 }
 
-// ---------- handlers ----------
-
-async function handleInit(body) {
-  const request = String(body.request || '').trim();
-  if (!request) throw new ToolError('BAD_REQUEST', 'request is required');
-  let taskId = String(body.taskId || '').trim();
-  if (!TASK_ID.test(taskId)) taskId = `t${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
-  const repoUrl = String(body.repoUrl || '').trim();
-  if (repoUrl && !GITHUB_URL.test(repoUrl)) throw new ToolError('BAD_REPO', 'Only https://github.com/<owner>/<repo> URLs are allowed.');
-
-  const ws = path.join(CONFIG.workspacesDir, taskId);
-  if (fs.existsSync(ws)) throw new ToolError('EXISTS', `Task ${taskId} already exists.`);
-  fs.mkdirSync(ws);
-  chownForRunner(ws);
-
-  const prevId = activeTaskId();
-  const prev = loadState(prevId);
-  if (prev && prev.status === 'running') {
-    prev.status = 'ABANDONED';
-    prev.stopReason = `Replaced by task ${taskId}`;
-    saveState(prev);
-  }
-
-  if (repoUrl) {
-    const clone = await git(ws, ['clone', '--depth', '50', repoUrl, '.'], 120);
-    if (clone.exitCode !== 0) throw new ToolError('CLONE_FAILED', truncate(clone.output, 1500));
-  } else {
-    await git(ws, ['init', '-q', '-b', 'main']);
-  }
-  await git(ws, ['config', 'user.email', 'agent@sandbox.local']);
-  await git(ws, ['config', 'user.name', 'Coding Agent']);
-  if (!repoUrl) await git(ws, ['commit', '-q', '--allow-empty', '-m', 'base: empty workspace']);
-  const head = await git(ws, ['rev-parse', 'HEAD']);
-  fs.appendFileSync(path.join(ws, '.git', 'info', 'exclude'), '\nnode_modules/\n.agent/\n__pycache__/\n.venv/\n*.pyc\n.pytest_cache/\n');
-
-  const state = {
+function blankState({ taskId, request, repoUrl, chatId, project }) {
+  return {
     taskId,
-    chatId: body.chatId ? String(body.chatId) : '',
+    chatId: chatId ? String(chatId) : '',
     request: truncate(request, 4000, 0.2),
-    repoUrl,
+    repoUrl: repoUrl || '',
     mode: repoUrl ? 'existing-codebase' : 'new-project',
-    project: String(body.project || repoUrl || 'general'),
+    project: String(project || repoUrl || 'general'),
     createdAt: Date.now(),
     status: 'running',
     stopReason: '',
@@ -331,7 +302,7 @@ async function handleInit(body) {
     failedRuns: 0,
     fixAttempts: 0,
     limitReached: false,
-    baseCommit: head.output.trim(),
+    baseCommit: '',
     plan: '',
     notes: '',
     nextStep: '',
@@ -342,6 +313,201 @@ async function handleInit(body) {
     final: null,
     log: [],
   };
+}
+
+function isTestLike(rel) {
+  return TEST_FILE.test(rel) || TEST_DIR.test(rel);
+}
+
+function findTestFiles(ws, limit = 20) {
+  const found = [];
+  const walk = (dir, depth) => {
+    if (found.length >= limit || depth > 5) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      return;
+    }
+    for (const e of entries) {
+      if (found.length >= limit) return;
+      if (SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      const rel = path.relative(ws, full);
+      if (e.isDirectory()) walk(full, depth + 1);
+      else if (e.isFile() && isTestLike(rel)) found.push(rel);
+    }
+  };
+  if (fs.existsSync(ws)) walk(ws, 0);
+  return found;
+}
+
+function commandReferencesTest(ws, command) {
+  for (let token of String(command).split(/\s+/)) {
+    token = token.replace(/^['"]|['"]$/g, '').replace(/[;,]+$/g, '');
+    if (!token || token.startsWith('-')) continue;
+    const abs = path.resolve(ws, token);
+    if (abs !== ws && !abs.startsWith(ws + path.sep)) continue;
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) continue;
+    if (isTestLike(path.relative(ws, abs))) return true;
+  }
+  return false;
+}
+
+function npmTestScript(ws, command) {
+  if (!/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b/.test(command)) return null;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ws, 'package.json'), 'utf8'));
+    const script = pkg.scripts && pkg.scripts.test ? String(pkg.scripts.test).trim() : '';
+    return script || false;
+  } catch (e) {
+    return false;
+  }
+}
+
+// DONE requires a real test run: a trivial `true` / `echo` is not evidence, and the
+// command (or the package.json test script it invokes) must execute a test file or a known runner.
+function explainTestEvidence(ws, command) {
+  const flat = String(command || '').trim().replace(/\s+/g, ' ');
+  if (!flat || TRIVIAL_COMMAND.test(flat)) return 'The command does not run a test suite.';
+  const script = npmTestScript(ws, flat);
+  if (script === false) return 'package.json has no test script, so this npm/yarn/pnpm test command is not evidence.';
+  const effective = script || flat;
+  if (TRIVIAL_COMMAND.test(effective)) return 'The test script does not run tests.';
+  if (commandReferencesTest(ws, effective)) return null;
+  if (TEST_RUNNER.test(effective) && findTestFiles(ws).length) return null;
+  return 'No test file or test runner was executed. Run the project tests, for example npm test, pytest, or node --test.';
+}
+
+async function workspaceSnapshot(state) {
+  const ws = workspaceOf(state);
+  if (!fs.existsSync(ws)) {
+    return { diff: { stat: '(no workspace)', files: [], patch: '' }, tree: '(workspace was not created)' };
+  }
+  let tree = '(unreadable)';
+  try {
+    tree = listTree(ws, '.', 3).entries;
+  } catch (e) {
+    tree = String(e.message || e);
+  }
+  let diff = { stat: '(no git repository)', files: [], patch: '' };
+  if (fs.existsSync(path.join(ws, '.git'))) {
+    try {
+      diff = await collectDiff(state, 6000);
+    } catch (e) {
+      diff = { stat: `Could not read diff: ${e.message}`, files: [], patch: '' };
+    }
+  }
+  return { diff, tree };
+}
+
+function reportFields(state, markdown, durationSec, diff) {
+  const final = state.final || {};
+  const summaryLine = (final.summary || state.stopReason || '').split('\n')[0];
+  return {
+    taskId: state.taskId,
+    chatId: state.chatId,
+    project: state.project,
+    mode: state.mode,
+    status: state.status,
+    stopReason: state.stopReason,
+    summary: final.summary || '',
+    lessons: final.lessons || [],
+    hasChanges: diff.files.length > 0,
+    filesChanged: diff.files,
+    fixAttemptsUsed: fixAttemptsUsed(state),
+    turns: state.turn,
+    durationSec,
+    canPush: state.status === 'DONE' && diff.files.length > 0,
+    caption: truncate(`Task ${state.taskId}: ${state.status}. ${summaryLine}`.replace(/[<>&*_`[\]]/g, ''), 900, 0.1),
+    markdown,
+  };
+}
+
+async function writeReport(state) {
+  const { diff, tree } = await workspaceSnapshot(state);
+  const { markdown, durationSec } = buildReport(state, diff, tree);
+  fs.mkdirSync(reportsDir, { recursive: true });
+  fs.writeFileSync(path.join(reportsDir, `${state.taskId}.md`), markdown);
+  const ws = workspaceOf(state);
+  if (fs.existsSync(ws)) {
+    try {
+      const agentDir = path.join(ws, '.agent');
+      mkdirpForRunner(agentDir, ws);
+      fs.writeFileSync(path.join(agentDir, 'REPORT.md'), markdown);
+    } catch (e) {
+      addLog(state, 'report', `workspace copy failed: ${e.message}`);
+      saveState(state);
+    }
+  }
+  return reportFields(state, markdown, durationSec, diff);
+}
+
+async function failTask(state, status, reason) {
+  state.status = status;
+  state.stopReason = truncate(String(reason || status), 1500, 0.4);
+  addLog(state, 'stop', `${status}: ${state.stopReason}`);
+  saveState(state);
+  const report = await writeReport(state);
+  return { ok: false, error: status, message: state.stopReason, ...report };
+}
+
+// ---------- handlers ----------
+
+async function handleInit(body) {
+  const request = String(body.request || '').trim();
+  if (!request) throw new ToolError('BAD_REQUEST', 'request is required');
+  let taskId = String(body.taskId || '').trim();
+  if (!TASK_ID.test(taskId)) taskId = `t${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
+  const repoUrl = String(body.repoUrl || '').trim();
+  const state = blankState({ taskId, request, repoUrl, chatId: body.chatId, project: body.project });
+
+  if (repoUrl && !GITHUB_URL.test(repoUrl)) {
+    return failTask(state, 'BAD_REPO', 'Only https://github.com/<owner>/<repo> URLs are allowed.');
+  }
+
+  const ws = workspaceOf(state);
+  if (fs.existsSync(ws)) {
+    return failTask(state, 'INIT_FAILED', `Task ${taskId} already exists.`);
+  }
+  fs.mkdirSync(ws);
+  chownForRunner(ws);
+
+  let head = '';
+  if (repoUrl) {
+    const clone = await git(ws, ['clone', '--depth', '50', repoUrl, '.'], CONFIG.cloneTimeoutSec);
+    if (clone.exitCode !== 0) {
+      return failTask(state, 'CLONE_FAILED', truncate(clone.output || 'git clone failed', 1500, 0.7));
+    }
+  } else {
+    const init = await git(ws, ['init', '-q', '-b', 'main']);
+    if (init.exitCode !== 0) return failTask(state, 'INIT_FAILED', truncate(init.output || 'git init failed', 1500, 0.7));
+  }
+  const email = await git(ws, ['config', 'user.email', 'agent@sandbox.local']);
+  const name = await git(ws, ['config', 'user.name', 'Coding Agent']);
+  if (email.exitCode !== 0 || name.exitCode !== 0) {
+    return failTask(state, 'INIT_FAILED', truncate(email.output || name.output || 'git config failed', 1500, 0.7));
+  }
+  if (!repoUrl) {
+    const base = await git(ws, ['commit', '-q', '--allow-empty', '-m', 'base: empty workspace']);
+    if (base.exitCode !== 0) return failTask(state, 'INIT_FAILED', truncate(base.output || 'git commit failed', 1500, 0.7));
+  }
+  const rev = await git(ws, ['rev-parse', 'HEAD']);
+  if (rev.exitCode !== 0) return failTask(state, 'INIT_FAILED', truncate(rev.output || 'git rev-parse failed', 1500, 0.7));
+  head = rev.output.trim();
+  fs.appendFileSync(path.join(ws, '.git', 'info', 'exclude'), '\nnode_modules/\n.agent/\n__pycache__/\n.venv/\n*.pyc\n.pytest_cache/\n');
+
+  const prevId = activeTaskId();
+  const prev = loadState(prevId);
+  if (prev && prev.status === 'running') {
+    prev.status = 'ABANDONED';
+    prev.stopReason = `Replaced by task ${taskId}`;
+    addLog(prev, 'stop', prev.stopReason);
+    saveState(prev);
+    await writeReport(prev);
+  }
+
+  state.baseCommit = head;
   addLog(state, 'init', repoUrl ? `cloned ${repoUrl}` : 'empty workspace');
   saveState(state);
   fs.writeFileSync(activeFile, JSON.stringify({ taskId }));
@@ -510,19 +676,16 @@ async function toolRun(state, body) {
   };
   let message = res.exitCode === 0 ? 'Command succeeded.' : 'Command failed. Read the output, find the cause, fix it, then run again.';
   if (res.timedOut) message = `Command timed out after ${timeoutSec}s. Avoid servers or watch modes; run tests in a single pass.`;
-  if (purpose === 'setup') {
-    state.lastSetup = record;
-  } else {
-    // A fix attempt is any verification run that follows a failed one.
-    const isFixAttempt = state.lastRun !== null && state.lastRun.exitCode !== 0;
-    if (isFixAttempt) state.fixAttempts += 1;
-    state.lastRun = record;
-    if (res.exitCode !== 0) {
-      state.failedRuns += 1;
-      if (isFixAttempt && state.fixAttempts >= CONFIG.maxFixAttempts) {
-        state.limitReached = true;
-        message = `Fix-attempt limit reached (${CONFIG.maxFixAttempts}). Do not change more code. Call finish with status FAILED.`;
-      }
+  if (purpose === 'setup') state.lastSetup = record;
+  else state.lastRun = record;
+  // The first failed command records the error. Every later failure counts as a repair
+  // attempt, including commands labeled setup. A passing install does not count.
+  if (res.exitCode !== 0) {
+    if (state.failedRuns > 0) state.fixAttempts += 1;
+    state.failedRuns += 1;
+    if (state.fixAttempts >= CONFIG.maxFixAttempts) {
+      state.limitReached = true;
+      message = `Fix-attempt limit reached (${CONFIG.maxFixAttempts}). Do not change more code. Call finish with status FAILED.`;
     }
   }
   addLog(state, `run:${purpose}`, `exit ${res.exitCode}${res.timedOut ? ' (timeout)' : ''}: ${command}`);
@@ -586,6 +749,8 @@ async function toolFinish(state, body) {
     if (state.lastWriteAt > last.at) {
       throw new ToolError('NOT_VERIFIED', 'Cannot finish as DONE: files changed after the last test run. Run the tests again.');
     }
+    const evidence = explainTestEvidence(workspaceOf(state), last.command);
+    if (evidence) throw new ToolError('NOT_VERIFIED', `Cannot finish as DONE: ${evidence}`);
   }
   const lessons = String(body.lessons || '')
     .split('\n')
@@ -649,11 +814,43 @@ function buildReport(state, diff, wsTree) {
   return { markdown: lines.join('\n'), durationSec };
 }
 
+function tryResolve(req, body) {
+  const explicit = (body && body.taskId) || req.headers['x-task-id'];
+  // An error report with no task id belongs to the running task only.
+  // A finished task must keep its own report.
+  if (!explicit && body && (body.error || body.stopReason)) {
+    const active = loadState(activeTaskId());
+    if (active && active.status === 'running') return active;
+    if (!active) return null;
+    if (body.error) return null;
+  }
+  try {
+    return resolveState(req, body);
+  } catch (e) {
+    return null;
+  }
+}
+
 async function handleReport(req, body) {
-  const state = resolveState(req, body);
+  let state = tryResolve(req, body);
+  if (!state) {
+    const reason = body.error || body.stopReason;
+    if (!reason) throw new ToolError('NO_TASK', 'No task found. Call /init first.');
+    state = blankState({
+      taskId: `err${Date.now().toString(36)}`,
+      request: '(no workspace was created for this run)',
+      chatId: body.chatId,
+      project: 'general',
+    });
+    state.status = 'ERROR';
+    state.stopReason = truncate(String(reason), 1500, 0.4);
+    addLog(state, 'error', state.stopReason);
+    saveState(state);
+    return { ok: true, ...await writeReport(state) };
+  }
   if (body.error && state.status === 'running') {
     state.status = 'ERROR';
-    state.stopReason = truncate(`Workflow error: ${body.error}`, 500);
+    state.stopReason = truncate(`Workflow error: ${body.error}`, 1500, 0.4);
     addLog(state, 'error', body.error);
   } else if (body.stopReason && !state.stopReason) {
     state.stopReason = String(body.stopReason);
@@ -662,35 +859,8 @@ async function handleReport(req, body) {
     state.status = 'STOPPED';
     state.stopReason = state.stopReason || 'Workflow ended without a final status.';
   }
-  const ws = workspaceOf(state);
-  const diff = await collectDiff(state, 6000);
-  const { markdown, durationSec } = buildReport(state, diff, listTree(ws, '.', 3).entries);
-  const agentDir = path.join(ws, '.agent');
-  mkdirpForRunner(agentDir, ws);
-  fs.writeFileSync(path.join(agentDir, 'REPORT.md'), markdown);
-  fs.writeFileSync(path.join(reportsDir, `${state.taskId}.md`), markdown);
   saveState(state);
-  const final = state.final || {};
-  const summaryLine = (final.summary || state.stopReason || '').split('\n')[0];
-  return {
-    ok: true,
-    taskId: state.taskId,
-    chatId: state.chatId,
-    project: state.project,
-    mode: state.mode,
-    status: state.status,
-    stopReason: state.stopReason,
-    summary: final.summary || '',
-    lessons: final.lessons || [],
-    hasChanges: diff.files.length > 0,
-    filesChanged: diff.files,
-    fixAttemptsUsed: fixAttemptsUsed(state),
-    turns: state.turn,
-    durationSec,
-    canPush: state.status === 'DONE' && diff.files.length > 0,
-    caption: truncate(`Task ${state.taskId}: ${state.status}. ${summaryLine}`.replace(/[<>&*_`[\]]/g, ''), 900, 0.1),
-    markdown,
-  };
+  return { ok: true, ...await writeReport(state) };
 }
 
 async function handlePush(req, body) {
@@ -771,6 +941,13 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://sandbox');
   try {
     if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, activeTask: activeTaskId() });
+    if (process.env.ALLOW_SHUTDOWN === '1' && req.method === 'POST' && url.pathname === '/shutdown') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 500).unref();
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/state') return send(res, 200, handleState(req, url));
     if (req.method !== 'POST') return send(res, 404, { ok: false, error: 'NOT_FOUND' });
 
